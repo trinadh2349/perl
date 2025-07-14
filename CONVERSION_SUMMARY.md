@@ -84,8 +84,6 @@ AND MOD(a.taxrptforpersnbr, %(max_thread)s) = %(thread_id)s
 ```
 
 ### Added Parameters
-- `HOST`: Database host
-- `SID`: Database SID
 - `RPT_ONLY`: Report-only mode flag
 - `OLD_ZOE_FILE` & `NEW_ZOE_FILE`: For delta processing
 
@@ -148,8 +146,7 @@ pip install oracledb pyodbc pyyaml
 python zoe_converter.py \
   --MODE=NEW \
   --MAX_THREADS=8 \
-  --HOST=your_db_host \
-  --SID=your_sid \
+  --TNS_SERVICE_NAME=DNATST4 \
   --P2P_SERVER=your_p2p_server \
   --CONFIG_FILE_PATH=config.yaml \
   --OUTPUT_FILE_PATH=/path/to/output

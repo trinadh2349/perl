@@ -34,8 +34,6 @@ class AppWorxEnum(StrEnum):
     P2P_SERVER = "P2PPRODLS,58318"
     P2P_SCHEMA = "P2P"
     P2P_DRIVERNAME = "SQL"
-    HOST = "localhost"
-    SID = "DNATST4"
     RPT_ONLY = "N"
 
     def __str__(self):
@@ -235,8 +233,6 @@ def thread_sub(connection_num: int, apwx: Apwx, thread_id: int, max_threads: int
         'getP2pDb': True,
         'maxThread': max_threads,
         'threadId': thread_id,
-        'host': apwx.args.HOST,
-        'sid': apwx.args.SID,
         'user': apwx.OSIUPDATE,
         'pw': apwx.OSIUPDATE_PW,
         'p2pServer': apwx.args.P2P_SERVER,
@@ -627,8 +623,6 @@ def parse_args(apwx: Apwx) -> Apwx:
     parser.add_arg(AppWorxEnum.P2P_SERVER, type=str, required=True)
     parser.add_arg(AppWorxEnum.P2P_SCHEMA, type=str, required=True)
     parser.add_arg(AppWorxEnum.P2P_DRIVERNAME, type=str, required=True)
-    parser.add_arg(AppWorxEnum.HOST, type=str, required=True)
-    parser.add_arg(AppWorxEnum.SID, type=str, required=True)
     parser.add_arg(AppWorxEnum.RPT_ONLY, choices=["Y", "N"], default="N", required=False)
     
     # Add delta mode specific arguments
