@@ -1,0 +1,1225 @@
+sql_qq: |
+  WITH adr AS (
+              SELECT DISTINCT
+                  persnbr,
+                  LISTAGG(text, ' ')
+                      WITHIN GROUP (
+                          ORDER BY ar.linenbr
+                  ) AS address,
+                  addr.cityname,
+                  addr.ctrycd,
+                  addr.statecd,
+                  addr.zipcd,
+                  addr.zipsuf
+              FROM (
+                  SELECT DISTINCT
+                      addrnbr,
+                      linenbr,
+                      text
+                  FROM addrline a
+                  JOIN addrlinetyp  al
+                      ON a.addrlinetypcd = al.addrlinetypcd
+              WHERE al.mailaddryn = 'Y'
+              ORDER BY al.addrlinetypseq, a.linenbr
+              ) ar
+              JOIN persaddruse pa
+                  ON ar.addrnbr = pa.addrnbr
+                  AND pa.addrusecd = 'PRI'
+                  AND pa.inactivedate IS NULL
+              JOIN addr
+                  ON pa.addrnbr = addr.addrnbr
+              GROUP BY persnbr, addr.ctrycd, addr.cityname, addr.statecd, addr.zipcd, addr.zipsuf
+          ),
+          ash AS(
+              SELECT DISTINCT
+                  a.acctnbr,
+                  a.curracctstatcd
+              FROM acct a
+              JOIN acctacctstathist ash
+                  ON a.acctnbr = ash.acctnbr
+              WHERE a.mjaccttypcd IN('CK','SAV')
+              AND a.currmiaccttypcd IN('PSA','BRHS','IAFT','SCUS','SSA','SPA','HCA','DSA','CUST','PCKA','FCPC','CKA','FCKA','RCKA') --consumer, non-retirement, non-Chargeoff
+              AND a.taxrptforpersnbr NOT IN(1094014,1093153,1379371)
+              AND (
+                  a.curracctstatcd = 'ACT'
+                  OR(
+                      a.curracctstatcd = 'CLS'
+                      AND EXISTS(
+                          SELECT DISTINCT 1
+                          FROM acctacctstathist ashz
+                          WHERE ashz.acctnbr = ash.acctnbr
+                          AND ashz.acctstatcd = 'CLS'
+                          AND ashz.effdatetime >= TRUNC(SYSDATE - 365)
+                      )
+                  )
+              )
+          )
+
+cardTaxRptForPers: |
+  SELECT
+                '' extcardnbr, -- ca.extcardnbr debit card nbr no longer required
+                a.taxrptforpersnbr persnbr,
+                a.acctnbr,
+                NULL MICR_Current,
+                NULL MICR_Old,
+                TO_CHAR(a.contractdate,'YYYYMMDD') contractdate,
+                (
+                    SELECT DISTINCT
+                        TO_CHAR(d.contractdate,'YYYYMMDD')
+                    FROM acct d
+                    WHERE d.mjaccttypcd = 'SAV'
+                    AND d.currmiaccttypcd = 'DSA'
+                    --AND d.curracctstatcd = 'ACT'
+                    AND d.contractdate = (
+                        SELECT
+                            MAX(aa.contractdate)
+                        FROM acct aa
+                        WHERE d.taxrptforpersnbr = aa.taxrptforpersnbr
+                        AND aa.mjaccttypcd = 'SAV'
+                        AND aa.currmiaccttypcd = 'DSA'
+                        --AND aa.curracctstatcd = 'ACT'
+                    )
+                    AND a.taxrptforpersnbr = d.taxrptforpersnbr
+                    AND ROWNUM = 1
+                ) dsa_contractdate,
+                (
+                  SELECT
+                      COUNT(persnbr) + 1
+                      FROM acctacctrolepers aarp
+                      WHERE a.acctnbr = aarp.acctnbr
+                      AND aarp.acctrolecd = 'OWN'
+                      AND aarp.inactivedate IS NULL
+                      AND a.taxrptforpersnbr <> aarp.persnbr
+                ) acctsegmentct,
+                'A' acctsegtyp,
+                CASE
+                    WHEN a.mjaccttypcd = 'CK'
+                    THEN 'CC'
+                    WHEN a.mjaccttypcd = 'SAV'
+                    THEN 'CS'
+                    ELSE NULL
+                END accttyp,
+                '0' businessindicator,
+                NULL businessname,
+                NULL contributionsource,
+                (
+                    SELECT e.text
+                    FROM persaddruse c
+                    LEFT JOIN addr d on c.addrnbr = d.addrnbr
+                    LEFT JOIN addrline e on d.addrnbr = e.addrnbr
+                    WHERE c.addrusecd = 'EML1'
+                    AND (c.inactivedate is null or c.inactivedate > sysdate)
+                    AND e.linenbr = 1
+                    AND e.text != 'NOEMAIL\@1STTECH.COM'
+                    AND e.text != 'Email Address'
+                    AND c.persnbr = p.persnbr
+                    AND ROWNUM = 1
+                ) as email,
+                '321180379' rtnbr,
+                '321180379' abanbr,
+                (
+                    SELECT
+                        LISTAGG(
+                            TO_CHAR(pi.expiredate,'YYYYMMDD')
+                            || ':' ||
+                            TO_CHAR(pi.issuedate,'YYYYMMDD')
+                            || ':' ||
+                            pi.ctrycd
+                            || ':' ||
+                            pi.statecd
+                            || ':' ||
+                            pi.idnbr
+                            || ':' ||
+                            DECODE(
+                                pi.persidtypcd,
+                                   1,0, --USA DL
+                                   2,4, --State ID
+                                   3,2, --Passport
+                                   6,1, --USA Mil
+                                   8,3, --Resident Alien
+                                   16,2, --Passport Card
+                                   NULL
+                            )
+                            || ':' ||
+                            i.persidtypdesc,
+                            '|'
+                        ) WITHIN GROUP( ORDER BY pi.persnbr ) id_row
+                    FROM persid pi
+                    JOIN persidtyp i
+                        ON pi.persidtypcd = i.persidtypcd
+                    WHERE i.persidtypcd IN(1,2,3,6,8,16)
+                    AND pi.persnbr = a.taxrptforpersnbr
+                    GROUP BY pi.persnbr
+                ) idrow,
+                TO_CHAR(p.datebirth,'YYYYMMDD') datebirth,
+                NVL2(p.datedeath,'Y','N') deceased,
+               (
+                  p.lastname || ',' || p.firstname || 
+                  DECODE( p.mdlinit, NULL, ',', (',' || p.mdlinit ||'.')) || -- middle initial if present
+                  DECODE( p.suffix, NULL, ',', (',' || p.suffix ||'.,')) -- suffix if present
+               ) name,
+                p.firstname,
+                p.lastname,
+                p.mdlname,
+                (
+                    SELECT
+                        areacd || exchange || phonenbr phonenbr
+                    FROM persphone pp
+                    WHERE a.taxrptforpersnbr = pp.persnbr
+                    AND phoneusecd = 'PER'
+                    AND ROWNUM = 1
+                ) phone,
+                'AH',
+                NULL intldialcd,
+                'M',
+                adr.cityname,
+                adr.ctrycd,
+                adr.statecd,
+                adr.address,
+                NULL altaddr1,
+                NULL altaddr2,
+                NULL altaddr3,
+                NULL altaddr4,
+                NULL altaddr5,
+                'P' addrtyp,
+                adr.zipcd,
+                NULL,
+                SUBSTR( pack_encrypt.func_decrypt( taxid, pack_BANK.func_GETTAXIDKEYVAL ), 0, 9 )taxid,
+                1 taxidtyp,
+                NULL suffix,
+                NULL prefix,
+                NULL businesscd,
+                NULL businessdba,
+                'IC09' individualclassification,
+                'AC09' acctclassification,
+                (
+                    SELECT
+                        TO_CHAR(effdatetime,'YYYYMMDD')
+                    FROM acctacctstathist ash
+                    WHERE a.acctnbr = ash.acctnbr
+                    AND ash.acctstatcd = 'CLS'
+                    AND ROWNUM = 1
+                ) acctclosedate,
+                'TAX' querysource,
+                ash.curracctstatcd
+            FROM acct a
+            JOIN pers p
+                ON a.taxrptforpersnbr = p.persnbr
+            JOIN acctagreementpers aap
+                ON a.acctnbr = aap.acctnbr AND a.taxrptforpersnbr = aap.persnbr
+            JOIN cardagreement ca
+                ON aap.agreenbr = ca.agreenbr
+            JOIN cardmember cm
+                ON ca.agreenbr = cm.agreenbr
+                AND ca.ownerpersnbr = cm.persnbr
+            JOIN cardmemberissue cmi
+                ON cm.agreenbr = cmi.agreenbr
+                AND cm.membernbr = cmi.membernbr
+                AND cm.currissuenbr = cmi.issuenbr
+            JOIN ash ON a.acctnbr = ash.acctnbr
+            LEFT JOIN adr
+                ON a.taxrptforpersnbr = adr.persnbr
+            WHERE a.mjaccttypcd IN('CK','SAV')
+            AND a.currmiaccttypcd IN('PSA','BRHS','IAFT','SCUS','SSA','SPA','HCA','DSA','CUST','PCKA','FCPC','CKA','FCKA','RCKA') --consumer, non-retirement, non-Chargeoff
+            AND a.taxrptforpersnbr IS NOT NULL
+            AND p.persnbr NOT IN(1094014,1093153,1379371)
+            AND a.mjaccttypcd IN('CK','SAV')
+            AND a.curracctstatcd IN('ACT')
+            AND aap.inactivedate IS NULL
+            AND ca.agreetypcd IN('MBD','MDBT','MCWD')
+            AND aap.persnbr = ca.ownerpersnbr
+            AND cmi.expiredate >= TRUNC(SYSDATE)
+            AND cmi.currstatuscd = 'ACT'
+            AND cm.membernbr = (
+                SELECT
+                    MAX(cmz.membernbr)
+                FROM cardmember cmz
+                WHERE cmz.agreenbr = cm.agreenbr
+                AND cmz.persnbr = cm.persnbr
+            )
+            AND MOD(a.taxrptforpersnbr, %(max_thread)s) = %(thread_id)s
+            AND EXISTS(
+                SELECT 1
+                FROM acct aa
+                WHERE aa.currmiaccttypcd = 'DSA'
+                AND aa.curracctstatcd = 'ACT'
+                AND a.taxrptforpersnbr = aa.taxrptforpersnbr
+            )
+
+cardOwnPers: |
+  SELECT
+                '' extcardnbr, -- ca.extcardnbr debit card nbr no longer required
+                arp.persnbr,
+                a.acctnbr,
+                NULL MICR_Current,
+                NULL MICR_Old,
+                TO_CHAR(a.contractdate,'YYYYMMDD') contractdate,
+                (
+                    SELECT DISTINCT
+                        TO_CHAR(d.contractdate,'YYYYMMDD')
+                    FROM acct d
+                    WHERE d.mjaccttypcd = 'SAV'
+                    AND d.currmiaccttypcd = 'DSA'
+                    AND d.curracctstatcd = 'ACT'
+                    AND d.contractdate = (
+                        SELECT
+                            MAX(aa.contractdate)
+                        FROM acct aa
+                        WHERE d.taxrptforpersnbr = aa.taxrptforpersnbr
+                        AND aa.mjaccttypcd = 'SAV'
+                        AND aa.currmiaccttypcd = 'DSA'
+                        AND aa.curracctstatcd = 'ACT'
+                    )
+                    AND arp.persnbr = d.taxrptforpersnbr
+                    AND ROWNUM = 1
+                ) dsa_contractdate,
+                (
+                  SELECT
+                      COUNT(persnbr) + 1 
+                      FROM acctacctrolepers aarp
+                      WHERE a.acctnbr = aarp.acctnbr
+                      AND aarp.acctrolecd = 'OWN'
+                      AND aarp.inactivedate IS NULL
+                      AND a.taxrptforpersnbr <> aarp.persnbr
+                ) acctsegmentct,
+                'A' acctsegtyp,
+                CASE
+                    WHEN a.mjaccttypcd = 'CK'
+                    THEN 'CC'
+                    WHEN a.mjaccttypcd = 'SAV'
+                    THEN 'CS'
+                    ELSE NULL
+                END accttyp,
+                '0' businessindicator,
+                NULL businessname,
+                NULL contributionsource,
+                (
+                    SELECT e.text
+                    FROM persaddruse c
+                    LEFT JOIN addr d on c.addrnbr = d.addrnbr
+                    LEFT JOIN addrline e on d.addrnbr = e.addrnbr
+                    WHERE c.addrusecd = 'EML1'
+                    AND (c.inactivedate is null or c.inactivedate > sysdate)
+                    AND e.linenbr = 1
+                    AND e.text != 'NOEMAIL\@1STTECH.COM'
+                    AND e.text != 'Email Address'
+                    AND c.persnbr = p.persnbr
+                    AND ROWNUM = 1
+                ) as email,
+                '321180379' rtnbr,
+                '321180379' abanbr,
+                (
+                    SELECT
+                        LISTAGG(
+                            TO_CHAR(pi.expiredate,'YYYYMMDD')
+                            || ':' ||
+                            TO_CHAR(pi.issuedate,'YYYYMMDD')
+                            || ':' ||
+                            pi.ctrycd
+                            || ':' ||
+                            pi.statecd
+                            || ':' ||
+                            pi.idnbr
+                            || ':' ||
+                            DECODE(
+                                pi.persidtypcd,
+                                   1,0, --USA DL
+                                   2,4, --State ID
+                                   3,2, --Passport
+                                   6,1, --USA Mil
+                                   8,3, --Resident Alien
+                                   16,2, --Passport Card
+                                   NULL
+                            )
+                            || ':' ||
+                            i.persidtypdesc,
+                            '|'
+                        ) WITHIN GROUP( ORDER BY pi.persnbr ) id_row
+                    FROM persid pi
+                    JOIN persidtyp i
+                        ON pi.persidtypcd = i.persidtypcd
+                    WHERE i.persidtypcd IN(1,2,3,6,8,16)
+                    AND pi.persnbr = arp.persnbr
+                    GROUP BY pi.persnbr
+                ) idrow,
+                TO_CHAR(p.datebirth,'YYYYMMDD') datebirth,
+                NVL2(p.datedeath,'Y','N') deceased,
+               (
+                  p.lastname || ',' || p.firstname || 
+                  DECODE( p.mdlinit, NULL, ',', (',' || p.mdlinit ||'.')) || -- middle initial if present
+                  DECODE( p.suffix, NULL, ',', (',' || p.suffix ||'.,')) -- suffix if present
+               ) name,
+                p.firstname,
+                p.lastname,
+                p.mdlname,
+                (
+                    SELECT
+                        areacd || exchange || phonenbr phonenbr
+                    FROM persphone pp
+                    WHERE arp.persnbr = pp.persnbr
+                    AND phoneusecd = 'PER'
+                    AND ROWNUM = 1
+                ) phone,
+                'AH',
+                NULL intldialcd,
+                'M',
+                adr.cityname,
+                adr.ctrycd,
+                adr.statecd,
+                adr.address,
+                NULL altaddr1,
+                NULL altaddr2,
+                NULL altaddr3,
+                NULL altaddr4,
+                NULL altaddr5,
+                'P' addrtyp,
+                adr.zipcd,
+                NULL,
+                SUBSTR( pack_encrypt.func_decrypt( taxid, pack_BANK.func_GETTAXIDKEYVAL ), 0, 9 )taxid,
+                1 taxidtyp,
+                NULL suffix,
+                NULL prefix,
+                NULL businesscd,
+                NULL businessdba,
+                'IC11' individualclassification,
+                'AC09' acctclassification,
+                (
+                    SELECT
+                        TO_CHAR(effdatetime,'YYYYMMDD')
+                    FROM acctacctstathist ash
+                    WHERE a.acctnbr = ash.acctnbr
+                    AND ash.acctstatcd = 'CLS'
+                    AND ROWNUM = 1
+                ) acctclosedate,
+                'OWN' querysource,
+                ash.curracctstatcd
+            FROM acctacctrolepers arp
+            JOIN acct a
+            	ON arp.acctnbr = a.acctnbr
+            JOIN pers p
+                ON arp.persnbr = p.persnbr
+            JOIN acctagreementpers aap
+                ON arp.acctnbr = aap.acctnbr AND arp.persnbr = aap.persnbr --a.taxrptforpersnbr = aap.persnbr
+            JOIN cardagreement ca
+                ON aap.agreenbr = ca.agreenbr
+            JOIN cardmember cm
+                ON ca.agreenbr = cm.agreenbr
+                AND ca.ownerpersnbr = cm.persnbr
+            JOIN cardmemberissue cmi
+                ON cm.agreenbr = cmi.agreenbr
+                AND cm.membernbr = cmi.membernbr
+                AND cm.currissuenbr = cmi.issuenbr
+            JOIN ash ON a.acctnbr = ash.acctnbr
+            LEFT JOIN adr
+                ON arp.persnbr = adr.persnbr
+            WHERE a.mjaccttypcd IN('CK','SAV')
+            AND a.currmiaccttypcd IN('PSA','BRHS','IAFT','SCUS','SSA','SPA','HCA','DSA','CUST','PCKA','FCPC','CKA','FCKA','RCKA') --consumer, non-retirement, non-Chargeoff
+            AND a.taxrptforpersnbr IS NOT NULL
+            AND p.persnbr NOT IN(1094014,1093153,1379371)
+            AND arp.acctrolecd = 'OWN'
+            AND arp.persnbr <> a.taxrptforpersnbr
+            AND aap.inactivedate IS NULL
+            AND ca.agreetypcd IN('MBD','MDBT','MCWD')
+            AND aap.persnbr = ca.ownerpersnbr
+            AND cmi.expiredate >= TRUNC(SYSDATE)
+            AND cmi.currstatuscd = 'ACT'
+            AND cm.membernbr = (
+                SELECT
+                    MAX(cmz.membernbr)
+                FROM cardmember cmz
+                WHERE cmz.agreenbr = cm.agreenbr
+                AND cmz.persnbr = cm.persnbr
+            )
+            AND EXISTS(
+                SELECT 1
+                FROM acct aa
+                WHERE aa.currmiaccttypcd = 'DSA'
+                AND aa.curracctstatcd = 'ACT'
+                AND arp.persnbr = aa.taxrptforpersnbr
+            )
+            AND MOD(arp.persnbr, %(max_thread)s) = %(thread_id)s
+
+noCardTaxRptForPers: |
+  SELECT
+                '' extcardnbr,
+                a.taxrptforpersnbr persnbr,
+                a.acctnbr,
+                NULL MICR_Current,
+                NULL MICR_Old,
+                TO_CHAR(a.contractdate,'YYYYMMDD') contractdate,
+                (
+                    SELECT DISTINCT
+                        TO_CHAR(d.contractdate,'YYYYMMDD')
+                    FROM acct d
+                    WHERE d.mjaccttypcd = 'SAV'
+                    AND d.currmiaccttypcd = 'DSA'
+                    AND d.curracctstatcd = 'ACT'
+                    AND d.contractdate = (
+                        SELECT
+                            MAX(aa.contractdate)
+                        FROM acct aa
+                        WHERE d.taxrptforpersnbr = aa.taxrptforpersnbr
+                        AND aa.mjaccttypcd = 'SAV'
+                        AND aa.currmiaccttypcd = 'DSA'
+                        AND aa.curracctstatcd = 'ACT'
+                    )
+                    AND a.taxrptforpersnbr = d.taxrptforpersnbr
+                    AND ROWNUM = 1
+                ) dsa_contractdate,
+                (
+                  SELECT
+                      COUNT(persnbr) + 1 
+                      FROM acctacctrolepers aarp
+                      WHERE a.acctnbr = aarp.acctnbr
+                      AND aarp.acctrolecd = 'OWN'
+                      AND aarp.inactivedate IS NULL
+                      AND a.taxrptforpersnbr <> aarp.persnbr
+                ) acctsegmentct,
+                'A' acctsegtyp,
+                CASE
+                    WHEN a.mjaccttypcd = 'CK'
+                    THEN 'CC'
+                    WHEN a.mjaccttypcd = 'SAV'
+                    THEN 'CS'
+                    ELSE NULL
+                END accttyp,
+                '0' businessindicator,
+                NULL businessname,
+                NULL contributionsource,
+                (
+                    SELECT e.text
+                    FROM persaddruse c
+                    LEFT JOIN addr d on c.addrnbr = d.addrnbr
+                    LEFT JOIN addrline e on d.addrnbr = e.addrnbr
+                    WHERE c.addrusecd = 'EML1'
+                    AND (c.inactivedate is null or c.inactivedate > sysdate)
+                    AND e.linenbr = 1
+                    AND e.text != 'NOEMAIL\@1STTECH.COM'
+                    AND e.text != 'Email Address'
+                    AND c.persnbr = p.persnbr
+                    AND ROWNUM = 1
+                ) as email,
+                '321180379' rtnbr,
+                '321180379' abanbr,
+                (
+                    SELECT
+                        LISTAGG(
+                            TO_CHAR(pi.expiredate,'YYYYMMDD')
+                            || ':' ||
+                            TO_CHAR(pi.issuedate,'YYYYMMDD')
+                            || ':' ||
+                            pi.ctrycd
+                            || ':' ||
+                            pi.statecd
+                            || ':' ||
+                            pi.idnbr
+                            || ':' ||
+                            DECODE(
+                            pi.persidtypcd,
+                               1,0, --USA DL
+                               2,4, --State ID
+                               3,2, --Passport
+                               6,1, --USA Mil
+                               8,3, --Resident Alien
+                               16,2, --Passport Card
+                               NULL
+                            )
+                            || ':' ||
+                            i.persidtypdesc,
+                            '|'
+                        ) WITHIN GROUP( ORDER BY pi.persnbr ) id_row
+                    FROM persid pi
+                    JOIN persidtyp i
+                        ON pi.persidtypcd = i.persidtypcd
+                    WHERE i.persidtypcd IN(1,2,3,6,8,16)
+                    AND pi.persnbr = a.taxrptforpersnbr
+                    GROUP BY pi.persnbr
+                ) idrow,
+                TO_CHAR(p.datebirth,'YYYYMMDD') datebirth,
+                NVL2(p.datedeath,'Y','N') deceased,
+               (
+                  p.lastname || ',' || p.firstname || 
+                  DECODE( p.mdlinit, NULL, ',', (',' || p.mdlinit ||'.')) || -- middle initial if present
+                  DECODE( p.suffix, NULL, ',', (',' || p.suffix ||'.,')) -- suffix if present
+               ) name,
+                p.firstname,
+                p.lastname,
+                p.mdlname,
+                (
+                    SELECT
+                        areacd || exchange || phonenbr phonenbr
+                    FROM persphone pp
+                    WHERE a.taxrptforpersnbr = pp.persnbr
+                    AND phoneusecd = 'PER'
+                    AND ROWNUM = 1
+                ) phone,
+                'AH',
+                NULL intldialcd,
+                'M',
+                adr.cityname,
+                adr.ctrycd,
+                adr.statecd,
+                adr.address,
+                NULL altaddr1,
+                NULL altaddr2,
+                NULL altaddr3,
+                NULL altaddr4,
+                NULL altaddr5,
+                'P' addrtyp,
+                adr.zipcd,
+                NULL,
+                SUBSTR( pack_encrypt.func_decrypt( taxid, pack_BANK.func_GETTAXIDKEYVAL ), 0, 9 )taxid,
+                1 taxidtyp,
+                NULL suffix,
+                NULL prefix,
+                NULL businesscd,
+                NULL businessdba,
+                'IC09' individualclassification,
+                'AC09' acctclassification,
+                (
+                    SELECT
+                        TO_CHAR(effdatetime,'YYYYMMDD')
+                    FROM acctacctstathist ash
+                    WHERE a.acctnbr = ash.acctnbr
+                    AND ash.acctstatcd = 'CLS'
+                    AND ROWNUM = 1
+                ) acctclosedate,
+                'TAX_NO_CARD' querysource,
+                ash.curracctstatcd
+            FROM acct a
+            JOIN pers p
+                ON a.taxrptforpersnbr = p.persnbr
+            JOIN ash ON a.acctnbr = ash.acctnbr
+            LEFT JOIN adr
+                ON a.taxrptforpersnbr = adr.persnbr
+            WHERE a.mjaccttypcd IN('CK','SAV')
+            AND a.currmiaccttypcd IN('PSA','BRHS','IAFT','SCUS','SSA','SPA','HCA','DSA','CUST','PCKA','FCPC','CKA','FCKA','RCKA') --consumer, non-retirement, non-Chargeoff
+            AND a.taxrptforpersnbr IS NOT NULL
+            AND p.persnbr NOT IN(1094014,1093153,1379371)
+            AND EXISTS(
+                SELECT 1
+                FROM acct aa
+                WHERE aa.currmiaccttypcd = 'DSA'
+                AND aa.curracctstatcd = 'ACT'
+                AND a.taxrptforpersnbr = aa.taxrptforpersnbr
+            )
+            AND NOT EXISTS(
+                SELECT 1
+                FROM cardagreement ca
+                WHERE ownerpersnbr = a.taxrptforpersnbr
+                AND ca.agreetypcd IN( 'MBD','MDBT','MCWD' )
+            )
+            AND MOD(a.taxrptforpersnbr, %(max_thread)s) = %(thread_id)s
+
+noCardOwnPers: |
+  SELECT
+                '' extcardnbr,
+                arp.persnbr,
+                a.acctnbr,
+                NULL MICR_Current,
+                NULL MICR_Old,
+                TO_CHAR(a.contractdate,'YYYYMMDD') contractdate,
+                (
+                    SELECT DISTINCT
+                        TO_CHAR(d.contractdate,'YYYYMMDD')
+                    FROM acct d
+                    WHERE d.mjaccttypcd = 'SAV'
+                    AND d.currmiaccttypcd = 'DSA'
+                    AND d.curracctstatcd = 'ACT'
+                    AND d.contractdate = (
+                        SELECT
+                            MAX(aa.contractdate)
+                        FROM acct aa
+                        WHERE d.taxrptforpersnbr = aa.taxrptforpersnbr
+                        AND aa.mjaccttypcd = 'SAV'
+                        AND aa.currmiaccttypcd = 'DSA'
+                        AND aa.curracctstatcd = 'ACT'
+                    )
+                    AND arp.persnbr = d.taxrptforpersnbr
+                    AND ROWNUM = 1
+                ) dsa_contractdate,
+                (
+                  SELECT
+                      COUNT(persnbr) + 1 
+                      FROM acctacctrolepers aarp
+                      WHERE a.acctnbr = aarp.acctnbr
+                      AND aarp.acctrolecd = 'OWN'
+                      AND aarp.inactivedate IS NULL
+                      AND a.taxrptforpersnbr <> aarp.persnbr
+                ) acctsegmentct,
+                'A' acctsegtyp,
+                CASE
+                    WHEN a.mjaccttypcd = 'CK'
+                    THEN 'CC'
+                    WHEN a.mjaccttypcd = 'SAV'
+                    THEN 'CS'
+                    ELSE NULL
+                END accttyp,
+                '0' businessindicator,
+                NULL businessname,
+                NULL contributionsource,
+                (
+                    SELECT e.text
+                    FROM persaddruse c
+                    LEFT JOIN addr d on c.addrnbr = d.addrnbr
+                    LEFT JOIN addrline e on d.addrnbr = e.addrnbr
+                    WHERE c.addrusecd = 'EML1'
+                    AND (c.inactivedate is null or c.inactivedate > sysdate)
+                    AND e.linenbr = 1
+                    AND e.text != 'NOEMAIL\@1STTECH.COM'
+                    AND e.text != 'Email Address'
+                    AND c.persnbr = p.persnbr
+                    AND ROWNUM = 1
+                ) as email,
+                '321180379' rtnbr,
+                '321180379' abanbr,
+                (
+                    SELECT
+                        LISTAGG(
+                            TO_CHAR(pi.expiredate,'YYYYMMDD')
+                            || ':' ||
+                            TO_CHAR(pi.issuedate,'YYYYMMDD')
+                            || ':' ||
+                            pi.ctrycd
+                            || ':' ||
+                            pi.statecd
+                            || ':' ||
+                            pi.idnbr
+                            || ':' ||
+                            DECODE(
+                                pi.persidtypcd,
+                                   1,0, --USA DL
+                                   2,4, --State ID
+                                   3,2, --Passport
+                                   6,1, --USA Mil
+                                   8,3, --Resident Alien
+                                   16,2, --Passport Card
+                                   NULL
+                            )
+                            || ':' ||
+                            i.persidtypdesc,
+                            '|'
+                        ) WITHIN GROUP( ORDER BY pi.persnbr ) id_row
+                    FROM persid pi
+                    JOIN persidtyp i
+                        ON pi.persidtypcd = i.persidtypcd
+                    WHERE i.persidtypcd IN(1,2,3,6,8,16)
+                    AND pi.persnbr = arp.persnbr
+                    GROUP BY pi.persnbr
+                ) idrow,
+                TO_CHAR(p.datebirth,'YYYYMMDD') datebirth,
+                NVL2(p.datedeath,'Y','N') deceased,
+               (
+                  p.lastname || ',' || p.firstname || 
+                  DECODE( p.mdlinit, NULL, ',', (',' || p.mdlinit ||'.')) || -- middle initial if present
+                  DECODE( p.suffix, NULL, ',', (',' || p.suffix ||'.,')) -- suffix if present
+               ) name,
+                p.firstname,
+                p.lastname,
+                p.mdlname,
+                (
+                    SELECT
+                        areacd || exchange || phonenbr phonenbr
+                    FROM persphone pp
+                    WHERE arp.persnbr = pp.persnbr
+                    AND phoneusecd = 'PER'
+                    AND ROWNUM = 1
+                ) phone,
+                'AH',
+                NULL intldialcd,
+                'M',
+                adr.cityname,
+                adr.ctrycd,
+                adr.statecd,
+                adr.address,
+                NULL altaddr1,
+                NULL altaddr2,
+                NULL altaddr3,
+                NULL altaddr4,
+                NULL altaddr5,
+                'P' addrtyp,
+                adr.zipcd,
+                NULL,
+                SUBSTR( pack_encrypt.func_decrypt( taxid, pack_BANK.func_GETTAXIDKEYVAL ), 0, 9 )taxid,
+                1 taxidtyp,
+                NULL suffix,
+                NULL prefix,
+                NULL businesscd,
+                NULL businessdba,
+                'IC11' individualclassification,
+                'AC09' acctclassification,
+                (
+                    SELECT
+                        TO_CHAR(effdatetime,'YYYYMMDD')
+                    FROM acctacctstathist ash
+                    WHERE a.acctnbr = ash.acctnbr
+                    AND ash.acctstatcd = 'CLS'
+                    AND ROWNUM = 1
+                ) acctclosedate,
+                'OWN_NO_CARD' querysource,
+                ash.curracctstatcd
+            FROM acctacctrolepers arp
+            JOIN acct a
+            	ON arp.acctnbr = a.acctnbr
+            JOIN pers p
+                ON arp.persnbr = p.persnbr
+            JOIN ash ON a.acctnbr = ash.acctnbr
+            LEFT JOIN adr
+                ON arp.persnbr = adr.persnbr
+            WHERE a.mjaccttypcd IN('CK','SAV')
+            AND a.currmiaccttypcd IN('PSA','BRHS','IAFT','SCUS','SSA','SPA','HCA','DSA','CUST','PCKA','FCPC','CKA','FCKA','RCKA') --consumer, non-retirement, non-Chargeoff
+            AND a.taxrptforpersnbr IS NOT NULL
+            AND arp.acctrolecd = 'OWN'
+            AND p.persnbr NOT IN(1094014,1093153,1379371)
+            AND arp.persnbr <> a.taxrptforpersnbr
+            AND EXISTS(
+                SELECT 1
+                FROM acct aa
+                WHERE aa.currmiaccttypcd = 'DSA'
+                AND aa.curracctstatcd = 'ACT'
+                AND arp.persnbr = aa.taxrptforpersnbr
+            )
+            AND NOT EXISTS(
+                SELECT 1
+                FROM cardagreement ca
+                WHERE ownerpersnbr = arp.persnbr
+                AND ca.agreetypcd IN( 'MBD','MDBT','MCWD' )
+            )
+            AND MOD(arp.persnbr, %(max_thread)s) = %(thread_id)s
+
+cardOwnPersOrg: |
+  SELECT
+                NULL extcardnbr, -- ca.extcardnbr debit card nbr no longer required
+                arp.persnbr,
+                a.acctnbr,
+                NULL MICR_Current,
+                NULL MICR_Old,
+                TO_CHAR(a.contractdate,'YYYYMMDD') contractdate,
+                (
+                    SELECT DISTINCT
+                        TO_CHAR(d.contractdate,'YYYYMMDD')
+                    FROM acct d
+                    WHERE d.mjaccttypcd = 'SAV'
+                    AND d.currmiaccttypcd = 'DSA'
+                    AND d.curracctstatcd = 'ACT'
+                    AND d.contractdate = (
+                        SELECT
+                            MAX(aa.contractdate)
+                        FROM acct aa
+                        WHERE d.taxrptforpersnbr = aa.taxrptforpersnbr
+                        AND aa.mjaccttypcd = 'SAV'
+                        AND aa.currmiaccttypcd = 'DSA'
+                        AND aa.curracctstatcd = 'ACT'
+                    )
+                    AND arp.persnbr = d.taxrptforpersnbr
+                    AND ROWNUM = 1
+                ) dsa_contractdate,
+                (
+                  SELECT
+                      COUNT(persnbr) + 1
+                      FROM acctacctrolepers aarp
+                      WHERE a.acctnbr = aarp.acctnbr
+                      AND aarp.acctrolecd = 'OWN'
+                      AND aarp.inactivedate IS NULL
+                ) acctsegmentct,
+                'A' acctsegtyp,
+                CASE
+                    WHEN a.mjaccttypcd = 'CK'
+                    THEN 'BC'
+                    WHEN a.mjaccttypcd = 'SAV'
+                    THEN 'BS'
+                    ELSE NULL
+                END accttyp,
+                '1' businessindicator,
+                o.orgname businessname,
+                NULL contributionsource,
+                (
+                    SELECT e.text
+                    FROM persaddruse c
+                    LEFT JOIN addr d on c.addrnbr = d.addrnbr
+                    LEFT JOIN addrline e on d.addrnbr = e.addrnbr
+                    WHERE c.addrusecd = 'EML1'
+                    AND (c.inactivedate is null or c.inactivedate > sysdate)
+                    AND e.linenbr = 1
+                    AND e.text != 'NOEMAIL\@1STTECH.COM'
+                    AND e.text != 'Email Address'
+                    AND c.persnbr = p.persnbr
+                    AND ROWNUM = 1
+                ) as email,
+                '321180379' rtnbr,
+                '321180379' abanbr,
+                (
+                    SELECT
+                        LISTAGG(
+                            TO_CHAR(pi.expiredate,'YYYYMMDD')
+                            || ':' ||
+                            TO_CHAR(pi.issuedate,'YYYYMMDD')
+                            || ':' ||
+                            pi.ctrycd
+                            || ':' ||
+                            pi.statecd
+                            || ':' ||
+                            pi.idnbr
+                            || ':' ||
+                            DECODE(
+                                pi.persidtypcd,
+                                   1,0, --USA DL
+                                   2,4, --State ID
+                                   3,2, --Passport
+                                   6,1, --USA Mil
+                                   8,3, --Resident Alien
+                                   16,2, --Passport Card
+                                   NULL
+                            )
+                            || ':' ||
+                            i.persidtypdesc,
+                            '|'
+                        ) WITHIN GROUP( ORDER BY pi.persnbr ) id_row
+                    FROM persid pi
+                    JOIN persidtyp i
+                        ON pi.persidtypcd = i.persidtypcd
+                    WHERE i.persidtypcd IN(1,2,3,6,8,16)
+                    AND pi.persnbr = arp.persnbr
+                    GROUP BY pi.persnbr
+                ) idrow,
+                TO_CHAR(p.datebirth,'YYYYMMDD') datebirth,
+                NVL2(p.datedeath,'Y','N') deceased,
+               (
+                  p.lastname || ',' || p.firstname || 
+                  DECODE( p.mdlinit, NULL, ',', (',' || p.mdlinit ||'.')) || -- middle initial if present
+                  DECODE( p.suffix, NULL, ',', (',' || p.suffix ||'.,')) -- suffix if present
+               ) name,
+                p.firstname,
+                p.lastname,
+                p.mdlname,
+                (
+                    SELECT
+                        areacd || exchange || phonenbr phonenbr
+                    FROM persphone pp
+                    WHERE arp.persnbr = pp.persnbr
+                    AND phoneusecd = 'PER'
+                    AND ROWNUM = 1
+                ) phone,
+                'AH',
+                NULL intldialcd,
+                'M',
+                adr.cityname,
+                adr.ctrycd,
+                adr.statecd,
+                adr.address,
+                NULL altaddr1,
+                NULL altaddr2,
+                NULL altaddr3,
+                NULL altaddr4,
+                NULL altaddr5,
+                'P' addrtyp,
+                adr.zipcd,
+                NULL,
+                SUBSTR( pack_encrypt.func_decrypt( taxid, pack_BANK.func_GETTAXIDKEYVAL ), 0, 9 )taxid,
+                1 taxidtyp,
+                NULL suffix,
+                NULL prefix,
+                NULL businesscd,
+                NULL businessdba,
+                'IC11' individualclassification,
+                'AC02' acctclassification,
+                (
+                    SELECT
+                        TO_CHAR(effdatetime,'YYYYMMDD')
+                    FROM acctacctstathist ash
+                    WHERE a.acctnbr = ash.acctnbr
+                    AND ash.acctstatcd = 'CLS'
+                    AND ROWNUM = 1
+                ) acctclosedate,
+                'CARDPERSORG' querysource,
+                ash.curracctstatcd
+            FROM acct a
+            JOIN org o
+            	ON a.taxrptfororgnbr = o.orgnbr
+            JOIN acctacctrolepers arp
+            	ON a.acctnbr = arp.acctnbr
+            JOIN pers p
+                ON arp.persnbr = p.persnbr
+            JOIN acctagreementpers aap
+                ON arp.acctnbr = aap.acctnbr AND arp.persnbr = aap.persnbr
+            JOIN cardagreement ca
+                ON aap.agreenbr = ca.agreenbr
+            JOIN cardmember cm
+                ON ca.agreenbr = cm.agreenbr
+                AND ca.ownerpersnbr = cm.persnbr
+            JOIN cardmemberissue cmi
+                ON cm.agreenbr = cmi.agreenbr
+                AND cm.membernbr = cmi.membernbr
+                AND cm.currissuenbr = cmi.issuenbr
+            JOIN ash ON a.acctnbr = ash.acctnbr
+            LEFT JOIN adr
+                ON arp.persnbr = adr.persnbr
+            WHERE a.mjaccttypcd IN('CK','SAV')
+            AND a.currmiaccttypcd IN('SBSC','FBSS','CIAC','BCDC','BCFC','FBCC') --business, non-Chargeoff
+            AND a.taxrptfororgnbr IS NOT NULL
+            AND arp.acctrolecd = 'OWN'
+            AND aap.inactivedate IS NULL
+            AND ca.agreetypcd IN('MBD','MDBT','MCWD')
+            AND aap.persnbr = ca.ownerpersnbr
+            AND cmi.expiredate >= TRUNC(SYSDATE)
+            AND cmi.currstatuscd = 'ACT'
+            AND cm.membernbr = (
+                SELECT
+                    MAX(cmz.membernbr)
+                FROM cardmember cmz
+                WHERE cmz.agreenbr = cm.agreenbr
+                AND cmz.persnbr = cm.persnbr
+            )
+            AND EXISTS(
+                SELECT 1
+                FROM acct aa
+                WHERE aa.currmiaccttypcd = 'DSA'
+                AND aa.curracctstatcd = 'ACT'
+                AND arp.persnbr = aa.taxrptforpersnbr
+            )
+            AND MOD(arp.persnbr, %(max_thread)s) = %(thread_id)s
+
+org: |
+  WITH adr AS (
+                      SELECT DISTINCT
+                          orgnbr,
+                          LISTAGG(text, ' ')
+                              WITHIN GROUP (
+                                  ORDER BY ar.linenbr
+                          ) AS address,
+                          addr.cityname,
+                          addr.ctrycd,
+                          addr.statecd,
+                          addr.zipcd,
+                          addr.zipsuf
+                      FROM (
+                          SELECT DISTINCT
+                              addrnbr,
+                              linenbr,
+                              text
+                          FROM addrline a
+                          JOIN addrlinetyp  al
+                              ON a.addrlinetypcd = al.addrlinetypcd
+                      WHERE al.mailaddryn = 'Y'
+                      ORDER BY al.addrlinetypseq, a.linenbr
+                      ) ar
+                      JOIN orgaddruse pa
+                          ON ar.addrnbr = pa.addrnbr
+                          AND pa.addrusecd = 'PRI'
+                          AND pa.inactivedate IS NULL
+                      JOIN addr
+                          ON pa.addrnbr = addr.addrnbr
+                      GROUP BY orgnbr, addr.ctrycd, addr.cityname, addr.statecd, addr.zipcd, addr.zipsuf
+                  ),
+                  ash AS(
+                      SELECT DISTINCT
+                          a.acctnbr,
+                          a.curracctstatcd
+                      FROM acct a
+                      JOIN acctacctstathist ash
+                          ON a.acctnbr = ash.acctnbr
+                      WHERE a.mjaccttypcd IN('CK','SAV')
+                      AND a.currmiaccttypcd IN('SBSC','FBSS','CIAC','BCDC','BCFC','FBCC') -- business
+                      AND (
+                          a.curracctstatcd = 'ACT'
+                          OR(
+                              a.curracctstatcd = 'CLS'
+                              AND EXISTS(
+                                  SELECT DISTINCT 1
+                                  FROM acctacctstathist ashz
+                                  WHERE ashz.acctnbr = ash.acctnbr
+                                  AND ashz.acctstatcd = 'CLS'
+                                  AND ashz.effdatetime >= TRUNC(SYSDATE - 365)
+                              )
+                          )
+                      )
+                  ),
+                 business_auth_signers AS (
+                  	SELECT DISTINCT
+                  		a.acctnbr,
+                       o.orgnbr,
+                       ap.persnbr,
+                       p.firstname,
+                       p.lastname,
+                       p.mdlname,
+                       p.mdlinit,
+                       p.suffix
+
+                    FROM acct a
+
+                    JOIN org o
+                       ON a.taxrptfororgnbr = o.orgnbr
+
+                    JOIN acctacctrolepers ap
+                       ON a.acctnbr = ap.acctnbr
+
+                    JOIN pers p
+                       ON ap.persnbr = p.persnbr
+
+                    WHERE ap.acctrolecd IN ('AUTH', 'SIGN')
+                  )
+
+              SELECT
+                  '' extcardnbr,
+                  a.taxrptfororgnbr orgnbr,
+                  a.acctnbr,
+                  NULL MICR_Current,
+                  NULL MICR_Old,
+                  TO_CHAR(a.contractdate,'YYYYMMDD') contractdate,
+                  (
+                      SELECT DISTINCT
+                          TO_CHAR(d.contractdate,'YYYYMMDD')
+                      FROM acct d
+                      WHERE d.mjaccttypcd = 'SAV'
+                      AND d.currmiaccttypcd = 'SBSC'
+                      AND d.curracctstatcd = 'ACT'
+                      AND d.contractdate = (
+                          SELECT
+                              MAX(aa.contractdate)
+                          FROM acct aa
+                          WHERE d.taxrptfororgnbr = aa.taxrptfororgnbr
+                          AND aa.mjaccttypcd = 'SAV'
+                          AND aa.currmiaccttypcd = 'SBSC'
+                          AND aa.curracctstatcd = 'ACT'
+                      )
+                      AND a.taxrptfororgnbr = d.taxrptfororgnbr
+                      AND ROWNUM = 1
+                  ) dsa_contractdate,
+                  (
+                    SELECT
+                        COUNT(persnbr) + 1
+                        FROM acctacctrolepers aarp
+                        WHERE a.acctnbr = aarp.acctnbr
+                        AND aarp.acctrolecd = 'OWN'
+                        AND aarp.inactivedate IS NULL
+                  ) acctsegmentct,
+                  'A' acctsegtyp,
+                  CASE
+                      WHEN a.mjaccttypcd = 'CK'
+                      THEN 'BC'
+                      WHEN a.mjaccttypcd = 'SAV'
+                      THEN 'BS'
+                      ELSE NULL
+                  END accttyp,
+                  '1' businessindicator,
+                  o.orgname businessname,
+                  NULL contributionsource,
+                  (
+                      SELECT e.text
+                      FROM orgaddruse c
+                      LEFT JOIN addr d on c.addrnbr = d.addrnbr
+                      LEFT JOIN addrline e on d.addrnbr = e.addrnbr
+                      WHERE c.addrusecd = 'EML1'
+                      AND (c.inactivedate is null or c.inactivedate > sysdate)
+                      AND e.linenbr = 1
+                      AND e.text != 'NOEMAIL\@1STTECH.COM'
+                      AND e.text != 'Email Address'
+                      AND c.orgnbr = o.orgnbr
+                      AND ROWNUM = 1
+                  ) as email,
+                  '321180379' rtnbr,
+                  '321180379' abanbr,
+  				'' idrow,
+                  '' datebirth,
+                  '' deceased,
+  					(
+                    bo.lastname || ',' || bo.firstname ||
+                    DECODE( bo.mdlinit, NULL, ',', (',' || bo.mdlinit ||'.')) || -- middle initial if present
+                    DECODE( bo.suffix, NULL, ',', (',' || bo.suffix ||'.,')) -- suffix if present
+                 ) owner_auth_signer_name,
+                  bo.firstname,
+                  bo.lastname,
+                  bo.mdlname,
+                  (
+                      SELECT
+                          areacd || exchange || phonenbr phonenbr
+                      FROM orgphone oo
+                      WHERE a.taxrptfororgnbr = oo.orgnbr
+                      AND phoneusecd = 'BUS'
+                      AND ROWNUM = 1
+                  ) phone,
+                  'AH',
+                  NULL intldialcd,
+                  'M',
+                  adr.cityname,
+                  adr.ctrycd,
+                  adr.statecd,
+                  adr.address,
+                  NULL altaddr1,
+                  NULL altaddr2,
+                  NULL altaddr3,
+                  NULL altaddr4,
+                  NULL altaddr5,
+                  'P' addrtyp,
+                  adr.zipcd,
+                  NULL,
+                  pack_encrypt.func_decrypt ( ot.taxid, pack_BANK.func_GETTAXIDKEYVAL ) taxid,
+                  2 taxidtyp,
+                  NULL suffix,
+                  NULL prefix,
+                  NULL businesscd,
+                  NULL businessdba,
+                  'IC09' individualclassification,
+                  'AC02' acctclassification,
+                  (
+                      SELECT
+                          TO_CHAR(effdatetime,'YYYYMMDD')
+                      FROM acctacctstathist ash
+                      WHERE a.acctnbr = ash.acctnbr
+                      AND ash.acctstatcd = 'CLS'
+                      AND ROWNUM = 1
+                  ) acctclosedate,
+                  'ORG' querysource,
+                  ash.curracctstatcd
+
+              FROM acct a
+
+              JOIN org o
+                  ON a.taxrptfororgnbr = o.orgnbr
+
+              JOIN orgtaxid ot
+                  ON o.orgnbr = ot.orgnbr
+
+              JOIN ash
+                 ON a.acctnbr = ash.acctnbr
+
+              LEFT JOIN adr
+                  ON a.taxrptfororgnbr = adr.orgnbr
+
+              JOIN business_auth_signers bo
+              	ON a.acctnbr = bo.acctnbr
+              	AND a.taxrptfororgnbr = bo.orgnbr
+
+
+              WHERE a.mjaccttypcd IN('CK','SAV')
+              AND a.currmiaccttypcd IN('SBSC','FBSS','CIAC','BCDC','BCFC','FBCC') -- business
+              AND a.taxrptfororgnbr IS NOT NULL
+              AND EXISTS(
+                  SELECT 1
+                  FROM acct aa
+                  WHERE aa.currmiaccttypcd = 'SBSC'
+                  AND aa.curracctstatcd = 'ACT'
+                  AND a.taxrptfororgnbr = aa.taxrptfororgnbr
+              )
+              AND MOD(a.taxrptfororgnbr, %(max_thread)s) = %(thread_id)s
+
+p2pCustOrg: |
+  SELECT
+                c.OSICoreId persnbr,
+                LOWER(c.CXCCustomerID) as CXCCustomerID,
+                c.OrgId,
+                (
+                    SELECT TOP 1
+                        t.MemberToken
+                    FROM Token t
+                    WHERE c.Id = t.CustomerId
+                    AND t.[Type] = 'E'
+                ) registeredEmail,
+                (
+                    SELECT TOP 1
+                        t.MemberToken
+                    FROM Token t
+                    WHERE c.Id = t.CustomerId
+                    AND t.[Type] = 'P'
+                ) registeredPhone
+            FROM Customer c
