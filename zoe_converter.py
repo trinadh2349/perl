@@ -29,7 +29,7 @@ class AppWorxEnum(StrEnum):
     OUTPUT_FILE_PATH = r'C:\Users\saitrinadhk\Documents\output\paymentupdate'
     TEST_YN = "N"
     DEBUG_YN = "N"
-    MAX_THREADS = "8"
+    MAX_THREADS = "4"
     MODE = "NEW"
     P2P_SERVER = "P2PPRODLS,58318"
     P2P_SCHEMA = "P2P"
@@ -222,11 +222,13 @@ def run(apwx: Apwx, current_time: float) -> bool:
 
 
 def thread_sub(connection_num: int, apwx: Apwx, thread_id: int, max_threads: int, zoe_data: list, apwx_vars: Apwx):
-    """Thread function to process ZOE records"""
-    time.sleep(connection_num)  # Delay to stagger thread starts
+    """Thread worker function for processing ZOE records"""
     print(f"Started thread: {thread_id}")
     
     p2p_args = {
+        'connection_num': connection_num,
+        'maxThreads': max_threads,
+        'threadId': thread_id,
         'zoe': True,
         'storeApwx': 'zoe',
         'getDnaDb': True,
@@ -245,23 +247,64 @@ def thread_sub(connection_num: int, apwx: Apwx, thread_id: int, max_threads: int
     p2p_db_connect = p2p_db_connect_func(p2p_args)
     print("p2p: ", p2p_db_connect)
 
-    # Connect to DNA database
-    dna_db_connect = dna_db_connect_func(p2p_args, apwx)
-    print("dna_db_connect: ", dna_db_connect)
-
-    # Process ZOE records
-    process_zoe_records(dna_db_connect, p2p_db_connect, max_threads, thread_id, zoe_data, apwx)
+    # Connect to DNA database with retry logic for session limit errors
+    dna_db_connect = None
+    max_retries = 3
+    retry_delay = 2  # seconds
     
-    # Close connections
+    for attempt in range(max_retries):
+        try:
+            dna_db_connect = dna_db_connect_func(p2p_args, apwx)
+            if dna_db_connect:
+                print("dna_db_connect: ", dna_db_connect)
+                break
+        except Exception as e:
+            if "ORA-02391" in str(e) or "exceeded simultaneous SESSIONS_PER_USER limit" in str(e):
+                print(f"[THREAD {thread_id}] Session limit exceeded, attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                    continue
+                else:
+                    print(f"[THREAD {thread_id}] Failed to connect after {max_retries} attempts due to session limits")
+                    dna_db_connect = None
+                    break
+            else:
+                print(f"[THREAD {thread_id}] Database connection error: {e}")
+                dna_db_connect = None
+                break
+
+    # Only process if we have a valid DNA database connection
     if dna_db_connect:
-        dna_db_connect.close()
+        try:
+            # Process ZOE records
+            process_zoe_records(dna_db_connect, p2p_db_connect, max_threads, thread_id, zoe_data, apwx)
+        except Exception as e:
+            print(f"[THREAD {thread_id}] Error processing records: {e}")
+        finally:
+            # Close connections
+            if dna_db_connect:
+                try:
+                    dna_db_connect.close()
+                except Exception as e:
+                    print(f"[THREAD {thread_id}] Error closing DNA connection: {e}")
+    else:
+        print(f"[THREAD {thread_id}] Skipping processing due to database connection failure")
+    
+    # Close P2P connection
+    if p2p_db_connect:
+        try:
+            p2p_db_connect.close()
+        except Exception as e:
+            print(f"[THREAD {thread_id}] Error closing P2P connection: {e}")
     
     print(f"Finished thread: {thread_id}")
 
 
 def process_zoe_records(dna_dbh: DbConnection, p2p_dbh, max_thread: int, thread_id: int, zoe_data: list, apwx: Apwx):
     """Process ZOE records from database queries"""
-    script_data = initialize(apwx)
+    # Reuse the existing DNA database connection instead of creating a new one
+    script_data = initialize(apwx, existing_dbh=dna_dbh)
     
     # Get P2P customer data first
     p2p_cust = {}
@@ -591,9 +634,12 @@ def build_cde_record() -> str:
     ])
 
 
-def initialize(apwx: Apwx) -> ScriptData:
+def initialize(apwx: Apwx, existing_dbh: Optional[DbConnection] = None) -> ScriptData:
     """Initializes database connection, loads YAML config"""
-    dbh = apwx.db_connect(autocommit=False)
+    if existing_dbh:
+        dbh = existing_dbh
+    else:
+        dbh = apwx.db_connect(autocommit=False)
     config = get_config(apwx)
     return ScriptData(apwx=apwx, dbh=dbh, config=config)
 
