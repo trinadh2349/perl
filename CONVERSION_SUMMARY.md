@@ -67,10 +67,11 @@ class AppWorxEnum(StrEnum):
 6. **`build_header_record()`** & **`build_trailer_record()`**: File structure
 
 ### Multi-threading Design
-- Configurable thread count via `MAX_THREADS`
+- Configurable thread count via `MAX_THREADS` (recommended: 4-6 threads)
 - Shared memory for record collection using `multiprocessing.Manager()`
-- Thread-safe database connections
+- Thread-safe database connections (1 Oracle + 1 SQL Server per thread)
 - Staggered connection timing to prevent resource contention
+- Handles Oracle `SESSIONS_PER_USER` limits gracefully
 
 ## Configuration Changes
 

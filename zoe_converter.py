@@ -249,25 +249,36 @@ def thread_sub(connection_num: int, apwx: Apwx, thread_id: int, max_threads: int
     dna_db_connect = dna_db_connect_func(p2p_args, apwx)
     print("dna_db_connect: ", dna_db_connect)
 
-    # Process ZOE records
-    process_zoe_records(dna_db_connect, p2p_db_connect, max_threads, thread_id, zoe_data, apwx)
-    
-    # Close connections
+    # Only process if DNA connection successful
     if dna_db_connect:
+        # Process ZOE records
+        process_zoe_records(dna_db_connect, p2p_db_connect, max_threads, thread_id, zoe_data, apwx)
+        
+        # Close connections
         dna_db_connect.close()
+    else:
+        print(f"[THREAD {thread_id}] Skipping processing due to failed DNA connection")
+    
+    # Close P2P connection if it exists
+    if p2p_db_connect:
+        try:
+            p2p_db_connect.close()
+        except:
+            pass
     
     print(f"Finished thread: {thread_id}")
 
 
 def process_zoe_records(dna_dbh: DbConnection, p2p_dbh, max_thread: int, thread_id: int, zoe_data: list, apwx: Apwx):
     """Process ZOE records from database queries"""
-    script_data = initialize(apwx)
+    # Load config without creating additional DB connection
+    config = get_config(apwx)
     
     # Get P2P customer data first
     p2p_cust = {}
     if p2p_dbh:
         try:
-            p2p_records = execute_sql_select(p2p_dbh, script_data.config["p2pCustOrg"])
+            p2p_records = execute_sql_select(p2p_dbh, config["p2pCustOrg"])
             for record in p2p_records:
                 p2p_cust[record.get('persnbr')] = record
         except Exception as e:
@@ -288,7 +299,7 @@ def process_zoe_records(dna_dbh: DbConnection, p2p_dbh, max_thread: int, thread_
 
     for key in query_keys:
         try:
-            sql = script_data.config["sql_qq"] + "\n" + script_data.config[key]
+            sql = config["sql_qq"] + "\n" + config[key]
             
             with dna_dbh.cursor() as cur:
                 cur.execute(sql, render_values)

@@ -104,7 +104,7 @@ python zoe_converter.py \
   --CONFIG_FILE_PATH=config.yaml \
   --OUTPUT_FILE_NAME=AOEP2P01.FTF \
   --OUTPUT_FILE_PATH=/path/to/output \
-  --MAX_THREADS=8 \
+  --MAX_THREADS=4 \
   --MODE=NEW \
   --P2P_SERVER=P2PPRODLS,58318 \
   --P2P_SCHEMA=P2P \
@@ -119,7 +119,7 @@ python zoe_converter.py \
   --CONFIG_FILE_PATH=config.yaml \
   --OUTPUT_FILE_NAME=AOEP2P01.FTF \
   --OUTPUT_FILE_PATH=/path/to/output \
-  --MAX_THREADS=8 \
+  --MAX_THREADS=4 \
   --MODE=DELTA \
   --P2P_SERVER=P2PPRODLS,58318 \
   --P2P_SCHEMA=P2P \
@@ -214,6 +214,15 @@ Failed to connect to DNA DB: ORA-12154: TNS:could not resolve the connect identi
 - Verify TNS service name configuration
 - Check Oracle client installation
 
+**Oracle Session Limit Errors:**
+```
+ORA-02391: exceeded simultaneous SESSIONS_PER_USER limit
+```
+- **Reduce MAX_THREADS parameter** (try 4 or fewer)
+- Check Oracle database parameter: `SESSIONS_PER_USER`
+- Each thread creates 1 Oracle connection
+- Contact DBA to increase limit if needed
+
 **SQL Server Connection Errors:**
 ```
 Failed to connect to P2P DB: [Microsoft][ODBC Driver Manager] Data source name not found
@@ -239,10 +248,12 @@ The application provides detailed console output:
 ## Performance Tuning
 
 ### Thread Count Optimization
-- Start with 4 threads for testing
+- **Start with 4 threads for testing**
+- **Check Oracle SESSIONS_PER_USER limit**: Each thread uses 1 Oracle connection
 - Increase gradually based on database performance
 - Monitor database connection limits
-- Typical production setting: 6-8 threads
+- **Typical production setting: 4-6 threads** (depending on DB limits)
+- **If you get ORA-02391 errors**: Reduce thread count
 
 ### Memory Management
 - Application uses streaming processing for large datasets
