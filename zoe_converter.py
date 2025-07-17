@@ -37,7 +37,7 @@ class AppWorxEnum(StrEnum):
     OLD_ZOE_FILE = auto()
     NEW_ZOE_FILE = auto()
 
-    def _str_(self):
+    def __str__(self):
         return self.name
 
 
@@ -853,7 +853,7 @@ def parse_args(apwx: Apwx) -> Apwx:
     return apwx
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     print(f"p2pZoeExtract.py\nVersion: {version}")
     print(f"Job started at {datetime.now()}")
 
